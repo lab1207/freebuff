@@ -10,6 +10,7 @@ import {
   getSkillsVersion,
   initializeSkillRegistry,
   refreshSkillRegistry,
+  startSkillDirWatcher,
   subscribeToSkillsVersion,
 } from '../skill-registry'
 
@@ -35,6 +36,8 @@ const writeSkill = (
   )
   return skillDir
 }
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-registry-'))
@@ -134,6 +137,61 @@ describe('skill-registry refresh', () => {
     unsubscribe()
     await refreshSkillRegistry()
     expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  test('watcher picks up an install without restart', async () => {
+    // The skills directory must exist BEFORE the watcher arms on it — fs.watch
+    // cannot watch a directory that does not exist. (A directory created and
+    // populated later is caught by the refresh-on-panel-open instead.)
+    fs.mkdirSync(path.join(tmpRoot, '.agents', 'skills'), { recursive: true })
+    startSkillDirWatcher()
+
+    await initializeSkillRegistry()
+    expect(getSkillCountForTest()).toBe(0)
+
+    writeSkill('project', 'deploy', {
+      name: 'deploy',
+      description: 'Deploy the app',
+    })
+
+    // Watcher debounce is 300ms; give it room on slow CI.
+    await wait(900)
+
+    expect(getSkillsVersion()).toBeGreaterThan(0)
+    expect(getLoadedSkills()['deploy']).toBeDefined()
+  })
+
+  test('watcher picks up an edit to an existing skill', async () => {
+    // The edit-in-place case: SKILL.md sits INSIDE an existing skill
+    // subdirectory, so a non-recursive watch misses the change on Linux
+    // (rename events only fire for entries directly in the watched dir).
+    // This test fails without recursive: true there, and guards the
+    // watcher against regressions on every platform.
+    writeSkill('project', 'deploy', {
+      name: 'deploy',
+      description: 'Deploy the app',
+    })
+    fs.mkdirSync(path.join(tmpRoot, '.agents', 'skills'), { recursive: true })
+    startSkillDirWatcher()
+
+    await initializeSkillRegistry()
+    expect(getLoadedSkills()['deploy'].description).toBe('Deploy the app')
+    const before = getSkillsVersion()
+
+    // Rewrite SKILL.md in place — no new directory, no rename at the
+    // watched level. Only a recursive watch can see this.
+    writeSkill('project', 'deploy', {
+      name: 'deploy',
+      description: 'Deploy the app to production',
+    })
+
+    // Watcher debounce is 300ms; give it room on slow CI.
+    await wait(900)
+
+    expect(getSkillsVersion()).toBeGreaterThan(before)
+    expect(getLoadedSkills()['deploy'].description).toBe(
+      'Deploy the app to production',
+    )
   })
 })
 
